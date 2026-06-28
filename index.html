@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <title>VR Ball Throw Monster Demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!-- A-Frame -->
+  <script src="https://aframe.io/releases/1.7.0/aframe.min.js"></script>
+
+  <style>
+    body { margin: 0; overflow: hidden; font-family: system-ui, sans-serif; }
+    #info {
+      position: fixed;
+      left: 12px;
+      top: 12px;
+      z-index: 5;
+      background: rgba(0,0,0,.62);
+      color: white;
+      padding: 10px 12px;
+      border-radius: 10px;
+      font-size: 14px;
+      line-height: 1.45;
+      max-width: 340px;
+    }
+    #info b { color: #ffe680; }
+  </style>
+</head>
+
+<body>
+<div id="info">
+  <b>VR Ball Throw Monster Demo</b><br>
+  Quest 3S: ブラウザで開いて「VRに入る」<br>
+  PC: クリックでボール発射 / WASD移動<br>
+  目標: ボールを投げて小モンスターに当てる
+</div>
+
+<a-scene
+  background="color: #93c9ff"
+  renderer="antialias: true; colorManagement: true"
+  vr-mode-ui="enabled: true"
+  xr-mode-ui="enabled: true"
+  game-manager>
+
+  <!-- Assets -->
+  <a-assets>
+    <audio id="hitSound" src="https://cdn.aframe.io/basic-guide/audio/backgroundnoise.wav"></audio>
+  </a-assets>
+
+  <!-- Lighting -->
+  <a-entity light="type: ambient; intensity: 0.55"></a-entity>
+  <a-entity light="type: directional; intensity: 0.8" position="2 5 3"></a-entity>
+
+  <!-- Ground -->
+  <a-plane
+    rotation="-90 0 0"
+    width="60"
+    height="60"
+    color="#74b85b"
+    shadow="receive: true"></a-plane>
+
+  <!-- Simple world objects -->
+  <a-box position="-3 0.5 -5" width="1" height="1" depth="1" color="#8b5a2b"></a-box>
+  <a-cylinder position="4 0.5 -6" radius="0.4" height="1" color="#8b5a2b"></a-cylinder>
+  <a-cone position="4 1.6 -6" radius-bottom="1.2" height="2" color="#2f8f45"></a-cone>
+
+  <a-cylinder position="-5 0.5 -9" radius="0.45" height="1" color="#8b5a2b"></a-cylinder>
+  <a-cone position="-5 1.7 -9" radius-bottom="1.4" height="2.4" color="#2f8f45"></a-cone>
+
+  <!-- Monster-like original target -->
+  <a-entity id="monster" monster-move position="0 0 -7">
+    <a-sphere id="monsterBody" position="0 0.9 0" radius="0.55" color="#b57cff"></a-sphere>
+    <a-sphere position="-0.18 1.03 0.48" radius="0.07" color="#111"></a-sphere>
+    <a-sphere position="0.18 1.03 0.48" radius="0.07" color="#111"></a-sphere>
+    <a-sphere position="0 0.78 0.53" radius="0.06" color="#ffefef"></a-sphere>
+    <a-cone position="-0.38 1.35 0" rotation="0 0 25" radius-bottom="0.15" height="0.45" color="#8b55ff"></a-cone>
+    <a-cone position="0.38 1.35 0" rotation="0 0 -25" radius-bottom="0.15" height="0.45" color="#8b55ff"></a-cone>
+    <a-text id="monsterLabel" value="TARGET" align="center" position="0 1.75 0" scale="0.6 0.6 0.6" color="#222"></a-text>
+  </a-entity>
+
+  <!-- Ball spawn point -->
+  <a-entity id="ballSpawn" position="0 1.35 -1.2"></a-entity>
+
+  <!-- Player Rig -->
+  <a-entity id="rig" position="0 0 0" movement-controls="speed: 0.18">
+    <a-entity
+      id="camera"
+      camera
+      look-controls
+      wasd-controls
+      position="0 1.6 0">
+      <a-cursor
+        color="#ffffff"
+        fuse="false"
+        raycaster="objects: .clickable">
+      </a-cursor>
+    </a-entity>
+
+    <!-- Quest / WebXR controllers -->
+    <a-entity
+      id="leftHand"
+      laser-controls="hand: left"
+      raycaster="objects: .throwBall"
+      hand-thrower="hand: left">
+    </a-entity>
+
+    <a-entity
+      id="rightHand"
+      laser-controls="hand: right"
+      raycaster="objects: .throwBall"
+      hand-thrower="hand: right">
+    </a-entity>
+  </a-entity>
+
+  <!-- UI text in world -->
+  <a-text
+    id="scoreText"
+    value="Score: 0"
+    position="-1.2 2.4 -3"
+    color="#111"
+    align="center"
+    scale="0.8 0.8 0.8">
+  </a-text>
+
+  <a-text
+    value="Trigger: grab / release to throw"
+    position="0 2.05 -3"
+    color="#111"
+    align="center"
+    scale="0.45 0.45 0.45">
+  </a-text>
+
+</a-scene>
+
+<script>
+/*
+  A-Frame Quest 3S throw prototype.
+  - PC fallback: click screen to shoot ball from camera direction.
+  - VR: controller trigger grabs the nearest ball, release throws it using controller velocity.
+  - Lightweight custom physics, no external physics engine needed.
+*/
+
+AFRAME.registerComponent('game-manager', {
+  init: function () {
+    const scene = this.el;
+    this.score = 0;
+    this.balls = [];
+    this.lastSpawn = 0;
+
+    this.scoreText = document.querySelector('#scoreText');
+    this.monster = document.querySelector('#monster');
+
+    this.spawnBall = () => {
+      const old = document.querySelectorAll('.throwBall');
+      if (old.length > 5) old[0].parentNode.removeChild(old[0]);
+
+      const ball = document.createElement('a-sphere');
+      ball.setAttribute('class', 'throwBall clickable');
+      ball.setAttribute('radius', '0.13');
+      ball.setAttribute('color', '#ff3b3b');
+      ball.setAttribute('position', '0 1.35 -1.2');
+      ball.setAttribute('throwable-ball', '');
+      scene.appendChild(ball);
+      this.balls.push(ball);
+      return ball;
+    };
+
+    this.addScore = () => {
+      this.score += 1;
+      this.scoreText.setAttribute('value', 'Score: ' + this.score);
+      const body = document.querySelector('#monsterBody');
+      body.setAttribute('color', '#ffe45c');
+      setTimeout(() => body.setAttribute('color', '#b57cff'), 180);
+    };
+
+    // First ball
+    setTimeout(() => this.spawnBall(), 500);
+
+    // PC fallback: click to fire a new ball from camera
+    window.addEventListener('click', () => {
+      if (scene.is('vr-mode')) return;
+
+      const camera = document.querySelector('#camera');
+      const ball = this.spawnBall();
+      const pos = new THREE.Vector3();
+      const dir = new THREE.Vector3();
+
+      camera.object3D.getWorldPosition(pos);
+      camera.object3D.getWorldDirection(dir);
+
+      pos.add(dir.clone().multiplyScalar(0.7));
+      ball.object3D.position.copy(pos);
+
+      const comp = ball.components['throwable-ball'];
+      if (comp) {
+        comp.velocity.copy(dir.multiplyScalar(-10));
+        comp.velocity.y += 1.4;
+        comp.active = true;
+      }
+    });
+  }
+});
+
+AFRAME.registerComponent('throwable-ball', {
+  schema: {},
+  init: function () {
+    this.velocity = new THREE.Vector3(0, 0, 0);
+    this.active = false;
+    this.grabbed = false;
+    this.radius = 0.13;
+    this.gravity = -9.8;
+    this.tmp = new THREE.Vector3();
+  },
+
+  tick: function (time, delta) {
+    if (this.grabbed) return;
+    if (!this.active) return;
+
+    const dt = Math.min(delta / 1000, 0.04);
+    const p = this.el.object3D.position;
+
+    this.velocity.y += this.gravity * dt;
+
+    p.x += this.velocity.x * dt;
+    p.y += this.velocity.y * dt;
+    p.z += this.velocity.z * dt;
+
+    // ground bounce
+    if (p.y < this.radius) {
+      p.y = this.radius;
+      this.velocity.y *= -0.42;
+      this.velocity.x *= 0.82;
+      this.velocity.z *= 0.82;
+
+      if (this.velocity.length() < 0.35) {
+        this.velocity.set(0, 0, 0);
+        this.active = false;
+      }
+    }
+
+    // hit test with monster
+    const monster = document.querySelector('#monster');
+    if (monster) {
+      const mp = new THREE.Vector3();
+      monster.object3D.getWorldPosition(mp);
+      mp.y += 0.9;
+
+      this.el.object3D.getWorldPosition(this.tmp);
+      const d = this.tmp.distanceTo(mp);
+
+      if (d < 0.72) {
+        const scene = document.querySelector('a-scene');
+        const manager = scene.components['game-manager'];
+        if (manager) manager.addScore();
+
+        // pop away and reset
+        this.velocity.set(
+          (Math.random() - 0.5) * 3,
+          3.0,
+          4 + Math.random() * 2
+        );
+        this.active = true;
+      }
+    }
+
+    // remove if too far
+    if (Math.abs(p.x) > 35 || Math.abs(p.z) > 35 || p.y < -10) {
+      this.el.parentNode.removeChild(this.el);
+    }
+  }
+});
+
+AFRAME.registerComponent('hand-thrower', {
+  schema: {
+    hand: {type: 'string', default: 'right'}
+  },
+
+  init: function () {
+    this.held = null;
+    this.prevPos = new THREE.Vector3();
+    this.nowPos = new THREE.Vector3();
+    this.velocity = new THREE.Vector3();
+    this.tmp = new THREE.Vector3();
+    this.hasPrev = false;
+
+    this.el.addEventListener('triggerdown', () => this.grabNearest());
+    this.el.addEventListener('gripdown', () => this.grabNearest());
+
+    this.el.addEventListener('triggerup', () => this.release());
+    this.el.addEventListener('gripup', () => this.release());
+  },
+
+  grabNearest: function () {
+    if (this.held) return;
+
+    const balls = Array.from(document.querySelectorAll('.throwBall'));
+    this.el.object3D.getWorldPosition(this.nowPos);
+
+    let best = null;
+    let bestD = 999;
+
+    for (const b of balls) {
+      b.object3D.getWorldPosition(this.tmp);
+      const d = this.tmp.distanceTo(this.nowPos);
+      if (d < bestD && d < 0.55) {
+        best = b;
+        bestD = d;
+      }
+    }
+
+    // If no ball nearby, create one in hand
+    if (!best) {
+      const manager = document.querySelector('a-scene').components['game-manager'];
+      if (manager) best = manager.spawnBall();
+    }
+
+    if (best) {
+      this.held = best;
+      const comp = best.components['throwable-ball'];
+      if (comp) {
+        comp.grabbed = true;
+        comp.active = false;
+        comp.velocity.set(0, 0, 0);
+      }
+      best.setAttribute('color', '#ffdd55');
+    }
+  },
+
+  release: function () {
+    if (!this.held) return;
+
+    const ball = this.held;
+    const comp = ball.components['throwable-ball'];
+
+    if (comp) {
+      comp.grabbed = false;
+      comp.active = true;
+
+      // Controller velocity gets converted to throw velocity.
+      comp.velocity.copy(this.velocity).multiplyScalar(1.25);
+
+      // Safety boost if velocity is too weak.
+      if (comp.velocity.length() < 2.0) {
+        const dir = new THREE.Vector3(0, 0, -1);
+        this.el.object3D.getWorldDirection(dir);
+        comp.velocity.copy(dir.multiplyScalar(-6));
+        comp.velocity.y += 1.8;
+      }
+    }
+
+    ball.setAttribute('color', '#ff3b3b');
+    this.held = null;
+  },
+
+  tick: function (time, delta) {
+    this.el.object3D.getWorldPosition(this.nowPos);
+
+    if (this.hasPrev && delta > 0) {
+      this.velocity
+        .copy(this.nowPos)
+        .sub(this.prevPos)
+        .multiplyScalar(1000 / delta);
+    }
+
+    this.prevPos.copy(this.nowPos);
+    this.hasPrev = true;
+
+    if (this.held) {
+      // Ball follows hand.
+      this.held.object3D.position.copy(this.nowPos);
+    }
+  }
+});
+
+AFRAME.registerComponent('monster-move', {
+  init: function () {
+    this.base = this.el.object3D.position.clone();
+  },
+  tick: function (time) {
+    const t = time / 1000;
+    this.el.object3D.position.x = Math.sin(t * 0.8) * 1.8;
+    this.el.object3D.position.z = -7 + Math.cos(t * 0.55) * 0.8;
+    this.el.object3D.rotation.y = Math.sin(t * 0.8) * 0.5;
+  }
+});
+</script>
+</body>
+</html>
